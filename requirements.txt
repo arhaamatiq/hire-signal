@@ -1,0 +1,16 @@
+# HireSignal — install with: pip install -r requirements.txt
+# Requires Python 3.11+. Use a virtualenv: python3.11 -m venv .venv && .venv/bin/pip install -r requirements.txt -e .
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-groq>=0.2.0
+langchain-openai>=0.2.0
+langchain-tavily>=0.1.0
+langgraph>=0.2.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+streamlit>=1.40.0
+requests>=2.32.0

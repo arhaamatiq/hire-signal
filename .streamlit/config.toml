@@ -1,0 +1,11 @@
+# Force light theme so all text is readable (dark text on light background)
+[theme]
+base = "light"
+primaryColor = "#4f46e5"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f1f5f9"
+textColor = "#1e293b"
+font = "sans serif"
+
+[server]
+headless = true

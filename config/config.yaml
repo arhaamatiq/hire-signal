@@ -1,0 +1,18 @@
+llm:
+  groq:
+    model_name: "llama-3.3-70b-versatile"
+  openai:
+    model_name: "gpt-4o-mini"
+
+companies:
+  defaults:
+    - "Anthropic"
+    - "OpenAI"
+    - "Google DeepMind"
+    - "Meta AI"
+    - "Mistral"
+
+analysis:
+  timeframe_days: 30
+  history_dir: "./data/historical"
+  output_dir: "./output"
