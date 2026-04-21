@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import Any, Dict, List, Tuple
 
 # Canonical AI domain taxonomy
 # Maps normalized skill/keyword → domain category
@@ -130,29 +130,58 @@ def compute_intent_score(
     domains: List[str],
     has_funding_news: bool,
     has_recent_papers: bool,
-) -> int:
+) -> Tuple[int, Dict[str, Any]]:
     """
     Score 0–100 from signals available on the first run (no historical baseline).
     Base 30 + job volume (up to 25) + domain coverage (up to 25) + funding (10) + papers (10), capped at 100.
+
+    Returns a tuple of (score, breakdown) where breakdown explains exactly which
+    signals fired and how many points each contributed. Only signals that actually
+    fired (non-zero bonus) are listed in breakdown["signals_found"].
     """
-    # Base score so companies with no signal still get a floor
-    score = 30
+    base = 30
+    signals_found: List[str] = []
 
     # AI job posting volume: more "engineer"/"scientist"/"researcher" in postings = stronger hiring signal
     text_lower = (postings_text or "").lower()
-    hits = sum(1 for kw in _AI_ROLE_KEYWORDS if kw in text_lower)
-    score += min(5, hits) * 5
+    distinct_role_hits = sum(1 for kw in _AI_ROLE_KEYWORDS if kw in text_lower)
+    total_role_hits = sum(text_lower.count(kw) for kw in _AI_ROLE_KEYWORDS)
+    job_volume_bonus = min(5, distinct_role_hits) * 5
+    if job_volume_bonus > 0:
+        signals_found.append(
+            f"{total_role_hits} AI role keywords found in job postings"
+        )
 
     # High-signal domain coverage: domains like "alignment" or "foundation models" suggest product focus
-    high_signal_count = len(set(d.lower() for d in domains) & HIGH_SIGNAL_DOMAINS)
-    score += min(5, high_signal_count) * 5
+    detected_high_signal = sorted(set(d.lower() for d in domains) & HIGH_SIGNAL_DOMAINS)
+    high_signal_count = len(detected_high_signal)
+    domain_bonus = min(5, high_signal_count) * 5
+    if domain_bonus > 0:
+        signals_found.append(
+            f"{high_signal_count} high-signal domains detected: "
+            + ", ".join(detected_high_signal)
+        )
 
     # Funding/partnership news: raises and deals often precede hiring surges
-    if has_funding_news:
-        score += 10
+    funding_bonus = 10 if has_funding_news else 0
+    if funding_bonus > 0:
+        signals_found.append("Funding/partnership news detected")
 
     # Recent arXiv papers: indicates active research investment
-    if has_recent_papers:
-        score += 10
+    papers_bonus = 10 if has_recent_papers else 0
+    if papers_bonus > 0:
+        signals_found.append("Recent arXiv papers found")
 
-    return max(0, min(100, int(score)))
+    total = max(0, min(100, base + job_volume_bonus + domain_bonus + funding_bonus + papers_bonus))
+
+    breakdown: Dict[str, Any] = {
+        "base": base,
+        "job_volume_bonus": job_volume_bonus,
+        "domain_bonus": domain_bonus,
+        "funding_bonus": funding_bonus,
+        "papers_bonus": papers_bonus,
+        "total": total,
+        "signals_found": signals_found,
+    }
+
+    return int(total), breakdown

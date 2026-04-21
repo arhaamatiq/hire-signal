@@ -258,6 +258,7 @@ def main():
         )
 
         # --- Intent score leaderboard: one clear row per company (metric + bar + label) ---
+        intent_breakdowns = result.get("intent_breakdowns") or {}
         st.markdown("#### Intent score leaderboard")
         for company in ranked:
             score = _score(company)
@@ -268,6 +269,23 @@ def main():
                 with col_bar:
                     st.progress(score / 100.0)
                     st.caption(intent_label(score))
+
+                breakdown = intent_breakdowns.get(company) or {}
+                if breakdown:
+                    with st.expander("Why this score?", expanded=False):
+                        signals = breakdown.get("signals_found") or []
+                        if signals:
+                            for signal in signals:
+                                st.markdown(f"- {signal}")
+                        else:
+                            st.caption("Only the base score contributed — no additional signals detected.")
+
+                        m1, m2, m3, m4, m5 = st.columns(5)
+                        m1.metric("Base",       breakdown.get("base", 0))
+                        m2.metric("Job Volume", f"+{breakdown.get('job_volume_bonus', 0)}")
+                        m3.metric("Domains",    f"+{breakdown.get('domain_bonus', 0)}")
+                        m4.metric("Funding",    f"+{breakdown.get('funding_bonus', 0)}")
+                        m5.metric("Papers",     f"+{breakdown.get('papers_bonus', 0)}")
 
         if result.get("report_filepath"):
             st.caption(f"Report saved: {result['report_filepath']}")

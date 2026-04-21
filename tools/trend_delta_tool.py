@@ -54,7 +54,7 @@ class TrendDeltaTool:
             except Exception:
                 domains = []
 
-            score = compute_intent_score(
+            score, breakdown = compute_intent_score(
                 postings_text=postings_text,
                 domains=domains,
                 has_funding_news=has_funding_news,
@@ -74,6 +74,7 @@ class TrendDeltaTool:
                 "company":      company,
                 "intent_score": score,
                 "label":        label,
+                "breakdown":    breakdown,
                 "components": {
                     "domain_count":      len(domains),
                     "funding_bonus":     has_funding_news,

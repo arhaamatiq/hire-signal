@@ -71,6 +71,7 @@ class AnalyzeResponse(BaseModel):
     final_report: str
     companies_analyzed: List[str]
     intent_scores: dict
+    intent_breakdowns: Optional[dict] = None
     company_narratives: Optional[dict] = None
     company_job_data: Optional[dict] = None
     company_news_data: Optional[dict] = None
@@ -113,6 +114,11 @@ async def analyze(request: AnalyzeRequest):
         company: data.get("intent_score", 0)
         for company, data in trend_deltas.items()
     }
+    intent_breakdowns = {
+        company: data.get("intent_breakdown", {})
+        for company, data in trend_deltas.items()
+        if data.get("intent_breakdown")
+    }
 
     # BUG FIX: export_report was defined but never called — reports were discarded.
     # Now called after every successful run.
@@ -129,6 +135,7 @@ async def analyze(request: AnalyzeRequest):
         final_report        = result.get("final_report", ""),
         companies_analyzed  = request.companies,
         intent_scores       = intent_scores,
+        intent_breakdowns   = intent_breakdowns,
         company_narratives  = result.get("company_narratives"),
         company_job_data    = result.get("company_job_data"),
         company_news_data   = result.get("company_news_data"),

@@ -1,7 +1,8 @@
 import json
 import logging
 import operator
-from typing import Annotated, Any, Dict, List, Optional, TypedDict
+import time
+from typing import Annotated, Any, Callable, Dict, List, Optional, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
@@ -59,6 +60,7 @@ class TalentSignalState(TypedDict):
     # Sequential downstream
     extracted_skills:   Dict[str, Any]
     trend_deltas:       Dict[str, Any]
+    intent_breakdown:   Dict[str, Any]
     company_narratives: Dict[str, str]
     final_report:       str
 
@@ -96,18 +98,56 @@ class GraphBuilder:
 
         self.graph = None
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _fetch_with_retry(self, tool_fn: Callable, args: dict, retries: int = 2, delay: float = 1.0):
+        """Retry a tool call up to `retries` times with delay before raising."""
+        last_exc = None
+        for attempt in range(retries + 1):
+            try:
+                return tool_fn(args)
+            except Exception as e:
+                last_exc = e
+                if attempt < retries:
+                    logger.warning(json.dumps({
+                        "event": "retry",
+                        "attempt": attempt + 1,
+                        "max_retries": retries,
+                        "error": str(e),
+                    }))
+                    time.sleep(delay)
+        raise last_exc
+
     # ── Nodes ─────────────────────────────────────────────────────────────────
 
     def validate_input(self, state: TalentSignalState) -> Dict:
         """Normalizes company names, sets defaults, initializes all state fields."""
+        node_start = time.perf_counter()
+        logger.info(json.dumps({"event": "node_enter", "node": "validate_input"}))
+
         companies = state.get("companies", [])
         if not companies:
             logger.error("No companies provided.")
+            elapsed = round(time.perf_counter() - node_start, 3)
+            logger.info(json.dumps({
+                "event": "node_exit",
+                "node": "validate_input",
+                "latency_s": elapsed,
+                "error": "No companies provided.",
+            }))
             return {"error": "No companies provided."}
 
         companies = [c.strip() for c in companies if c.strip()]
         timeframe = state.get("timeframe_days", 30)
         logger.info(f"Pipeline started: {len(companies)} companies — {companies}")
+
+        elapsed = round(time.perf_counter() - node_start, 3)
+        logger.info(json.dumps({
+            "event": "node_exit",
+            "node": "validate_input",
+            "latency_s": elapsed,
+            "companies_count": len(companies),
+        }))
 
         return {
             "companies":         companies,
@@ -116,6 +156,7 @@ class GraphBuilder:
             "company_news_data": {},
             "extracted_skills":  {},
             "trend_deltas":      {},
+            "intent_breakdown":  {},
             "company_narratives":{},
             "final_report":      "",
             "error":             None,
@@ -126,6 +167,14 @@ class GraphBuilder:
         """Passthrough node. Exists as a clean routing checkpoint between
         the validation error gate and the Send() fan-out.
         """
+        node_start = time.perf_counter()
+        logger.info(json.dumps({"event": "node_enter", "node": "coordinator"}))
+        elapsed = round(time.perf_counter() - node_start, 3)
+        logger.info(json.dumps({
+            "event": "node_exit",
+            "node": "coordinator",
+            "latency_s": elapsed,
+        }))
         return {}
 
     def company_researcher(self, state: CompanyResearchInput) -> Dict:
@@ -136,6 +185,12 @@ class GraphBuilder:
         """
         company   = state["company"]
         timeframe = state.get("timeframe_days", 30)
+        node_start = time.perf_counter()
+        logger.info(json.dumps({
+            "event": "node_enter",
+            "node": "company_researcher",
+            "company": company,
+        }))
         logger.info(f"Researching: {company}")
 
         # Job data
@@ -149,10 +204,13 @@ class GraphBuilder:
                 t for t in self.job_search_tool.tool_list
                 if t.name == "get_posting_velocity"
             )
-            job_results["postings"] = postings_tool.invoke({"company": company})
-            job_results["velocity"] = velocity_tool.invoke({
-                "company": company, "timeframe_days": timeframe
-            })
+            job_results["postings"] = self._fetch_with_retry(
+                postings_tool.invoke, {"company": company}
+            )
+            job_results["velocity"] = self._fetch_with_retry(
+                velocity_tool.invoke,
+                {"company": company, "timeframe_days": timeframe},
+            )
             job_results["estimated_posting_count"] = TrendCalculator.estimate_posting_count(
                 job_results["postings"]
             )
@@ -170,8 +228,12 @@ class GraphBuilder:
         try:
             news_tool    = next(t for t in self.news_tool.tool_list if t.name == "get_company_ai_news")
             funding_tool = next(t for t in self.news_tool.tool_list if t.name == "get_funding_and_partnerships")
-            news_results["news"]    = news_tool.invoke({"company": company})
-            news_results["funding"] = funding_tool.invoke({"company": company})
+            news_results["news"]    = self._fetch_with_retry(
+                news_tool.invoke, {"company": company}
+            )
+            news_results["funding"] = self._fetch_with_retry(
+                funding_tool.invoke, {"company": company}
+            )
         except Exception as e:
             logger.warning(f"News fetch failed for {company}: {e}")
             news_results = {"error": str(e), "news": "", "funding": ""}
@@ -186,6 +248,18 @@ class GraphBuilder:
             logger.warning(f"arXiv fetch failed for {company}: {e}")
             news_results["papers"] = ""
 
+        papers_text = news_results.get("papers", "")
+        elapsed = round(time.perf_counter() - node_start, 3)
+        logger.info(json.dumps({
+            "event": "node_exit",
+            "node": "company_researcher",
+            "company": company,
+            "latency_s": elapsed,
+            "job_fetch_ok": "error" not in job_results,
+            "news_fetch_ok": "error" not in news_results,
+            "papers_found": len(papers_text) > 50,
+        }))
+
         return {
             "company_job_data":  {company: job_results},
             "company_news_data": {company: news_results},
@@ -193,6 +267,9 @@ class GraphBuilder:
 
     def extract_skills(self, state: TalentSignalState) -> Dict:
         """Runs skill extraction on all collected job posting data."""
+        node_start = time.perf_counter()
+        logger.info(json.dumps({"event": "node_enter", "node": "extract_skills"}))
+
         job_data  = state.get("company_job_data", {})
         extracted = {}
 
@@ -213,10 +290,21 @@ class GraphBuilder:
                 }
 
         logger.info(f"Skills extracted for {len(extracted)} companies.")
+
+        elapsed = round(time.perf_counter() - node_start, 3)
+        logger.info(json.dumps({
+            "event": "node_exit",
+            "node": "extract_skills",
+            "latency_s": elapsed,
+            "companies_processed": len(extracted),
+        }))
         return {"extracted_skills": extracted}
 
     def analyze_trends(self, state: TalentSignalState) -> Dict:
         """Computes deltas vs historical snapshots, scores intent, saves snapshots."""
+        node_start = time.perf_counter()
+        logger.info(json.dumps({"event": "node_enter", "node": "analyze_trends"}))
+
         job_data    = state.get("company_job_data", {})
         skills_data = state.get("extracted_skills", {})
         news_data   = state.get("company_news_data", {})
@@ -240,16 +328,24 @@ class GraphBuilder:
             papers_text = current_news.get("papers", "")
             has_recent_papers = len(papers_text) > 50
 
-            intent_score = compute_intent_score(
+            intent_score, breakdown = compute_intent_score(
                 postings_text=current_jobs.get("postings", ""),
                 domains=current_skills.get("domains", []),
                 has_funding_news=has_funding,
                 has_recent_papers=has_recent_papers,
             )
 
+            logger.info(json.dumps({
+                "event": "intent_scored",
+                "node": "analyze_trends",
+                "company": company,
+                "intent_score": intent_score,
+            }))
+
             deltas[company] = {
                 "posting_delta":    delta,
                 "intent_score":     intent_score,
+                "intent_breakdown": breakdown,
                 "top_skills":       current_skills.get("top_skills", []),
                 "ai_domains":       current_skills.get("domains", []),
                 "role_types":       current_skills.get("role_types", []),
@@ -261,10 +357,21 @@ class GraphBuilder:
             self.data_store.save(company, current_jobs)
 
         logger.info("Trend analysis complete.")
+
+        elapsed = round(time.perf_counter() - node_start, 3)
+        logger.info(json.dumps({
+            "event": "node_exit",
+            "node": "analyze_trends",
+            "latency_s": elapsed,
+            "companies_scored": len(deltas),
+        }))
         return {"trend_deltas": deltas}
 
     def generate_narratives(self, state: TalentSignalState) -> Dict:
         """LLM generates per-company intelligence narratives."""
+        node_start = time.perf_counter()
+        logger.info(json.dumps({"event": "node_enter", "node": "generate_narratives"}))
+
         narratives = {}
 
         for company in state["companies"]:
@@ -293,10 +400,20 @@ class GraphBuilder:
             except Exception as e:
                 narratives[company] = f"*Narrative generation failed: {e}*"
 
+        elapsed = round(time.perf_counter() - node_start, 3)
+        logger.info(json.dumps({
+            "event": "node_exit",
+            "node": "generate_narratives",
+            "latency_s": elapsed,
+            "narratives_generated": len(narratives),
+        }))
         return {"company_narratives": narratives}
 
     def synthesize_report(self, state: TalentSignalState) -> Dict:
         """Final synthesis: LLM integrates per-company narratives into a ranked brief."""
+        node_start = time.perf_counter()
+        logger.info(json.dumps({"event": "node_enter", "node": "synthesize_report"}))
+
         narratives = state.get("company_narratives", {})
         deltas     = state.get("trend_deltas", {})
 
@@ -340,6 +457,15 @@ Using the data above, write the final HireSignal Intelligence Brief (four sectio
             final_report = response.content
         except Exception as e:
             final_report = f"*Synthesis failed: {e}*\n\n" + narratives_block
+
+        elapsed = round(time.perf_counter() - node_start, 3)
+        logger.info(json.dumps({
+            "event": "node_exit",
+            "node": "synthesize_report",
+            "companies_analyzed": len(state["companies"]),
+            "report_chars": len(final_report),
+            "latency_s": elapsed,
+        }))
 
         return {
             "final_report": final_report,
